@@ -114,6 +114,17 @@ extension Git {
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 
+    /// Whether `branchRef` has no commits beyond `commit` — `branchRef` is at
+    /// or behind `commit`, with nothing added on top. Fails closed (`false`,
+    /// i.e. "new work exists") when `commit` cannot be resolved, e.g. it was
+    /// never fetched locally.
+    public static func hasNoCommitsSince(_ commit: String, on branchRef: String) -> Bool {
+        guard let out = try? run(["rev-list", "--count", "\(commit)..\(branchRef)"]) else {
+            return false
+        }
+        return out.trimmingCharacters(in: .whitespacesAndNewlines) == "0"
+    }
+
     /// Force-deletes a local branch. Returns the captured result rather than
     /// throwing so callers can report a per-branch failure (e.g. the branch is
     /// checked out in another worktree) and continue.
