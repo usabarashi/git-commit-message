@@ -4,28 +4,44 @@ import GitCore
 
 let helpText = """
 git-branch-clean — delete local branches already integrated into the default
-branch, including squash-merged ones.
+branch, including squash-merged ones, plus branches merged anywhere via a
+GitHub pull request.
 
 USAGE:
-    git branch-clean [--dry-run] [--no-fetch] [--yes] [--help]
+    git branch-clean [--dry-run] [--no-fetch] [--no-gh] [--yes] [--help]
 
     Compares every local branch against the remote default branch
     (origin/HEAD) and lists those whose work is already represented there:
 
-      - merged          tip is an ancestor of the default branch
+      - merged           tip is an ancestor of the default branch
       - patch-equivalent the branch diff already exists (squash-merged)
-      - no-diff         the branch has no net change since its merge-base
+      - no-diff          the branch has no net change since its merge-base
+      - pr-merged        a GitHub pull request under this branch's name was
+                         merged (per `gh pr list`, into ANY branch — not
+                         necessarily the default branch) and the branch
+                         has no commits beyond that merged commit
 
     Protected branches are never deleted: the current branch, the default
     branch, and main / master / develop / release/*.
 
-    Detection is content-based, not provenance: a branch is a candidate when
-    its final content is already on the default branch. Deletion uses
-    `git branch -D`; recover any branch with `git branch <name> <sha>`.
+    The first three reasons are content-based: a branch is a candidate when
+    its final content is already on the default branch, however it got
+    there. `pr-merged` is different and weaker: it fires whenever a GitHub
+    pull request under the branch's name was merged into any branch at
+    all — a topic branch, `develop`, a release branch — even if that content
+    has not yet reached the default branch. It is trusted only when the
+    local branch has no commits beyond the exact commit GitHub merged, so a
+    branch that kept committing after its pull request merged is never
+    caught by name alone, and a branch with no merged pull request at all is
+    never touched by this check. Only the 500 most recently merged pull
+    requests are considered; an older one may go unmatched. Pass --no-gh to
+    disable this check and keep detection strictly content-based. Deletion
+    uses `git branch -D`; recover any branch with `git branch <name> <sha>`.
 
 OPTIONS:
     --dry-run    List candidates and exit without deleting.
     --no-fetch   Skip the `git fetch --prune` that refreshes origin first.
+    --no-gh      Skip the `gh pr list` pull-request check.
     --yes, -y    Delete without the confirmation prompt (for scripts).
     -h, --help   Show this help.
 """
@@ -48,9 +64,10 @@ if arguments.contains("--help") || arguments.contains("-h") {
 }
 let isDryRun = arguments.contains("--dry-run")
 let skipFetch = arguments.contains("--no-fetch")
+let skipGitHub = arguments.contains("--no-gh")
 let assumeYes = arguments.contains("--yes") || arguments.contains("-y")
 
-let recognizedOptions: Set<String> = ["--dry-run", "--no-fetch", "--yes", "-y"]
+let recognizedOptions: Set<String> = ["--dry-run", "--no-fetch", "--no-gh", "--yes", "-y"]
 for argument in arguments where !recognizedOptions.contains(argument) {
     fail("unknown option '\(argument)'. See --help")
 }
@@ -94,19 +111,35 @@ if let current = Git.currentBranch() {
     protectedBranches.insert(current)
 }
 
+var mergedPullRequestHeads: [String: Set<GitHub.MergedPullRequestHead>]? = nil
+if !skipGitHub {
+    if let mergedPullRequests = GitHub.mergedPullRequests() {
+        mergedPullRequestHeads = mergedPullRequests.heads
+        if mergedPullRequests.truncated {
+            note("gh pr list hit its query limit; an older merged pull request may go unmatched")
+        }
+    } else {
+        note(
+            "gh unavailable, unauthenticated, or no GitHub remote; skipping the pull-request check "
+                + "(pass --no-gh to silence this)")
+    }
+}
+
 let candidates = BranchCleaner.candidates(
     base: base,
     protectedBranches: protectedBranches,
-    protectedPrefixes: ["release/"])
+    protectedPrefixes: ["release/"],
+    mergedPullRequestHeads: mergedPullRequestHeads,
+    defaultBranchName: defaultBranch)
 
 if candidates.isEmpty {
-    print("Nothing to delete — no local branch is fully integrated into \(baseLabel).")
+    print("Nothing to delete — no local branch is fully integrated into \(baseLabel), and none matched a merged GitHub pull request.")
     exit(0)
 }
 
 // MARK: - Present
 
-print("Branches already integrated into \(baseLabel):\n")
+print("Branches ready to delete (integrated into \(baseLabel), or merged via a GitHub pull request):\n")
 let width = candidates.map(\.branch.count).max() ?? 0
 for candidate in candidates {
     let name = candidate.branch.padding(toLength: width, withPad: " ", startingAt: 0)
